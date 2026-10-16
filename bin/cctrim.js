@@ -4,9 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
 
-const HELP = `ccdoctor: find out why Claude Code burns through your usage
+const HELP = `cctrim: find out why Claude Code burns through your usage
 
-Usage: ccdoctor [options]
+Usage: cctrim [options]
 
   --days <n>       Look back n days (default 7)
   --project <str>  Only sessions whose project path contains <str>
@@ -248,7 +248,7 @@ function table(rows, cols) {
 function render(r, top) {
   const out = [];
   const h = (t) => out.push("", bold(cyan(t)));
-  out.push(bold(`ccdoctor: last ${r.window.days} days${r.window.project ? `, projects matching "${r.window.project}"` : ""}`));
+  out.push(bold(`cctrim: last ${r.window.days} days${r.window.project ? `, projects matching "${r.window.project}"` : ""}`));
   out.push(`  ${r.totals.sessions} sessions, ${r.totals.subagentRuns} subagent runs, ${r.totals.turns.toLocaleString()} model turns`);
   out.push(`  ${fmt(r.totals.cacheRead)} cache-read tokens, ${fmt(r.totals.cacheWrite)} cache writes, ${fmt(r.totals.output)} output`);
   out.push(dim("  Cache reads are the context Claude re-reads on every turn. They dominate usage, so this report ranks by them."));

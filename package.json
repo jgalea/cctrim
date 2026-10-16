@@ -1,13 +1,13 @@
 {
-  "name": "ccdoctor",
+  "name": "cctrim",
   "version": "0.1.0",
   "description": "Find out why Claude Code burns through your usage: long sessions, runaway subagents, fixed overhead, hook output over the cap.",
   "type": "module",
-  "bin": { "ccdoctor": "bin/ccdoctor.js" },
+  "bin": { "cctrim": "bin/cctrim.js" },
   "files": ["bin"],
   "engines": { "node": ">=18" },
   "keywords": ["claude", "claude-code", "tokens", "usage", "cost", "anthropic"],
   "author": "Jean Galea",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/jgalea/ccdoctor.git" }
+  "repository": { "type": "git", "url": "git+https://github.com/jgalea/cctrim.git" }
 }

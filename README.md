@@ -1,4 +1,4 @@
-<h1 align="center">ccdoctor</h1>
+<h1 align="center">cctrim</h1>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/LICENSE-MIT-5C9E31?style=for-the-badge" alt="License"></a>
@@ -7,17 +7,17 @@
 
 <p align="center"><b>Find out why Claude Code burns through your usage, and what to change.</b></p>
 
-Tools like [ccusage](https://github.com/ryoppippi/ccusage) tell you how much you used. ccdoctor tells you why: which sessions ran too long, which subagents ran away, how much context every session starts with, and which hooks are silently truncated. Then it tells you what to fix.
+Tools like [ccusage](https://github.com/ryoppippi/ccusage) tell you how much you used. cctrim tells you why: which sessions ran too long, which subagents ran away, how much context every session starts with, and which hooks are silently truncated. Then it tells you what to fix.
 
 ```
-npx github:jgalea/ccdoctor
+npx github:jgalea/cctrim
 ```
 
 Requires Node 18+. It reads your local transcripts in `~/.claude/projects` and prints a report. Nothing is sent anywhere.
 
 ## What it checks
 
-Most Claude Code usage is cache reads. Every turn re-reads the whole conversation so far, so a session sitting at 500k tokens costs ten times as much per turn as one at 50k. ccdoctor ranks everything by cache reads for that reason.
+Most Claude Code usage is cache reads. Every turn re-reads the whole conversation so far, so a session sitting at 500k tokens costs ten times as much per turn as one at 50k. cctrim ranks everything by cache reads for that reason.
 
 - Usage by context size per turn. If most of it comes from turns above 300k, your sessions run too long.
 - Sessions with 300+ turns, more than two days of activity, or a 250k+ average context.
@@ -62,7 +62,7 @@ What to change
 
 ## Notes
 
-Token counts come straight from the transcripts. File sizes under Fixed overhead are estimated at four characters per token. ccdoctor doesn't price anything: on a subscription the dollar figure isn't what you pay, and the shares are what tell you where to act. For cost estimates, use ccusage alongside it.
+Token counts come straight from the transcripts. File sizes under Fixed overhead are estimated at four characters per token. cctrim doesn't price anything: on a subscription the dollar figure isn't what you pay, and the shares are what tell you where to act. For cost estimates, use ccusage alongside it.
 
 Claude Code deletes transcripts after 30 days by default, so `--days` can't reach further back than that.
 
