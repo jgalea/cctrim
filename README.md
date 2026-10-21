@@ -29,12 +29,19 @@ Most Claude Code usage is cache reads. Every turn re-reads the whole conversatio
 
 The report ends with concrete recommendations based on what it found.
 
+## Usage per commit
+
+A usage report says what you spent, not whether it shipped anything. `--shipped` adds a section that counts your own commits (by `git config user.email`) in every git repo you ran Claude Code in, then divides usage by them, per repo and overall. It also splits your weeks into heavier and lighter halves by usage and compares commits per week and usage per commit, and shows a rework share: commits whose files another commit changed again within three days, plus reverts. That last one is a rough proxy: generated files and a series of follow-up commits count as rework too. Commits are the unit for now; merged PRs would be a better one.
+
+Worktrees and clones of the same repo are counted once. Projects that aren't git repos are skipped and counted. Both usage and commits start where your transcripts do, and the week comparison needs at least four complete weeks.
+
 ## Options
 
 ```
 --days <n>       Look back n days (default 7)
 --project <str>  Only sessions whose project path contains <str>
 --top <n>        Rows per table (default 8)
+--shipped        Add usage per commit from local git (default window 56 days)
 --json           Machine-readable output
 --dir <path>     Claude config dir (default $CLAUDE_CONFIG_DIR or ~/.claude)
 ```
@@ -60,11 +67,29 @@ What to change
   1. 58% of your usage comes from turns with more than 300k tokens in context. ...
 ```
 
+With `--shipped`:
+
+```
+Shipped units: your commits in the repos you used Claude Code in
+  412 commits across 9 repos: 4.2M cache-read and 4.4M total tokens per commit
+  Skipped 3 non-git project(s), 61.0M cache-read tokens not counted.
+  project            commits  cache-read  per commit  total/commit  rework
+  ~/code/api             188      910.4M        4.8M          5.0M     31%
+  ~/code/site             97      402.7M        4.2M          4.3M     22%
+
+  Heavier vs lighter weeks
+  weeks          cache-read/week  commits/week  per commit
+  heavier (n=2)          552.0M            63        8.8M
+  lighter (n=2)          214.5M            41        5.2M
+
+  Rework: 27% of commits (109 had a file changed again within 3 days, 2 reverts)
+```
+
 ## Notes
 
 Token counts come straight from the transcripts. File sizes under Fixed overhead are estimated at four characters per token. cctrim doesn't price anything: on a subscription the dollar figure isn't what you pay, and the shares are what tell you where to act. For cost estimates, use ccusage alongside it.
 
-Claude Code deletes transcripts after 30 days by default, so `--days` can't reach further back than that.
+Claude Code deletes transcripts after 30 days by default, so `--days` can't reach further back than that. Raise `cleanupPeriodDays` in `settings.json` to keep more history; `--shipped` reads it to know where your usage data starts. It needs git 2.31 or newer.
 
 ## License
 
