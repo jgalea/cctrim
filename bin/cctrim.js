@@ -165,14 +165,18 @@ function weekLabel(mon) {
   return `${y}-W${String(Math.ceil(((thu - Date.UTC(y, 0, 1)) / DAY + 1) / 7)).padStart(2, "0")}`;
 }
 
+// Repos found in transcripts may be clones nobody vetted, so config that can run a program is switched off.
+const GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=false", "-c", "diff.external=", "-c", "protocol.allow=never"];
+const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
+
 function git(cwd, args) {
   try {
-    return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 }).trim();
+    return execFileSync("git", [...GIT_SAFE, "-C", cwd, ...args], { encoding: "utf8", env: GIT_ENV, stdio: ["ignore", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 }).trim();
   } catch { return null; }
 }
 
 function readCommits(root, sinceMs) {
-  const out = git(root, ["log", "--branches", "--no-merges", "--no-renames", `--since=${new Date(sinceMs).toISOString()}`, "--format=%x1e%H%x09%at%x09%ae%x09%s", "--name-only"]);
+  const out = git(root, ["log", "--branches", "--no-merges", "--no-renames", `--since=${new Date(sinceMs).toISOString()}`, "--format=%x1e%H%x09%at%x09%ae%x09%s", "--name-only", "--no-ext-diff", "--no-textconv"]);
   if (out === null) return null;
   return out.split("\x1e").filter(Boolean).map((chunk) => {
     const [head, ...files] = chunk.split("\n");
@@ -225,7 +229,7 @@ function findTop(dir, cache) {
 function ignoredPaths(top, paths) {
   let out;
   try {
-    out = execFileSync("git", ["-C", top, "check-ignore", "--stdin", "-z"], { input: paths.join("\0"), encoding: "utf8", stdio: ["pipe", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 });
+    out = execFileSync("git", [...GIT_SAFE, "-C", top, "check-ignore", "--stdin", "-z"], { input: paths.join("\0"), encoding: "utf8", env: GIT_ENV, stdio: ["pipe", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 });
   } catch (e) { out = e.status === 1 ? "" : null; }
   return out === null ? null : new Set(out.split("\0").filter(Boolean));
 }
