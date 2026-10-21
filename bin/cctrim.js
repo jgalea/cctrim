@@ -61,12 +61,28 @@ function readMeta(file) {
   try { return JSON.parse(fs.readFileSync(file.replace(/\.jsonl$/, ".meta.json"), "utf8")); } catch { return {}; }
 }
 
+function touchedPaths(b, cwd) {
+  const i = b.input || {};
+  const abs = (p) => {
+    if (typeof p !== "string" || !p || p.includes("$")) return null;
+    if (p === "~" || p.startsWith("~/")) p = path.join(os.homedir(), p.slice(1));
+    return path.isAbsolute(p) ? path.normalize(p) : cwd ? path.resolve(cwd, p) : null;
+  };
+  if (b.name === "Bash") {
+    const m = typeof i.command === "string" && i.command.match(/(?:^|&&|;|\|\|)\s*(?:cd|git\s+-C)\s+(["']?)([^\s"'&;|]+)\1/);
+    const p = abs(m ? m[2] : null);
+    return p ? { path: p } : abs(cwd) ? { path: abs(cwd), fromCwd: true } : null;
+  }
+  const p = abs(i.file_path || i.notebook_path || i.path);
+  return p ? { path: p } : null;
+}
+
 async function scanFile(file, sinceIso, weekly) {
   const isSub = file.includes(`${path.sep}subagents${path.sep}`);
   const s = {
     file, isSub, agentType: isSub ? readMeta(file).agentType || "unknown" : null,
     turns: 0, cacheRead: 0, cacheWrite: 0, input: 0, output: 0, maxCtx: 0, firstCtx: null,
-    first: null, last: null, compactions: 0, models: {}, cwd: null, hookSpills: [], bigResults: [], daily: {},
+    first: null, last: null, compactions: 0, models: {}, cwd: null, hookSpills: [], bigResults: [], daily: {}, touches: new Map(), cwdTouches: new Map(),
   };
   const seen = new Set();
   const toolNames = new Map();
@@ -88,7 +104,13 @@ async function scanFile(file, sinceIso, weekly) {
     }
     const content = j.message?.content;
     if (j.type === "assistant" && Array.isArray(content)) {
-      for (const b of content) if (b?.type === "tool_use") toolNames.set(b.id, b.name);
+      for (const b of content) {
+        if (b?.type !== "tool_use") continue;
+        toolNames.set(b.id, b.name);
+        if (!weekly) continue;
+        const t = touchedPaths(b, j.cwd || s.cwd);
+        if (t) { const m = t.fromCwd ? s.cwdTouches : s.touches; m.set(t.path, (m.get(t.path) || 0) + 1); }
+      }
     }
     if (j.type === "user" && Array.isArray(content)) {
       for (const b of content) {
@@ -159,43 +181,121 @@ function readCommits(root, sinceMs) {
   });
 }
 
+const GENERATED = /(^|\/)(node_modules|vendor|dist|build)\/|\.min\.[^/]+$|\.map$|(^|\/)(package-lock\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|composer\.lock|Gemfile\.lock|Cargo\.lock|poetry\.lock|uv\.lock|Pipfile\.lock|go\.sum|Podfile\.lock|Package\.resolved|pubspec\.lock|mix\.lock)$/;
+const SERIES_GAP = 30 * 60e3;
+
+// A series of commits by one author, each within 30 minutes of the last and sharing a file, is one change unit.
 function markRework(commits, mine) {
+  for (const c of commits) c.files = c.files.filter((f) => !GENERATED.test(f));
+  const byAuthor = new Map();
+  for (const c of commits) (byAuthor.get(c.email) || byAuthor.set(c.email, []).get(c.email)).push(c);
+  for (const list of byAuthor.values()) {
+    let unit = null;
+    for (const c of list.sort((x, y) => x.at - y.at)) {
+      if (unit && c.at - unit.end <= SERIES_GAP && c.files.some((f) => unit.files.has(f))) unit.end = c.at;
+      else unit = { end: c.at, files: new Set(), commits: [] };
+      for (const f of c.files) unit.files.add(f);
+      unit.commits.push(c);
+      c.unit = unit;
+    }
+  }
   const touches = new Map();
   for (const c of commits) for (const f of c.files) (touches.get(f) || touches.set(f, []).get(f)).push(c);
-  for (const c of mine) {
-    c.revert = /^Revert/.test(c.subject);
-    c.reworked = c.files.some((f) => touches.get(f).some((d) => d.hash !== c.hash && d.at > c.at && d.at - c.at <= REWORK_WINDOW));
+  const units = [...new Set(mine.map((c) => c.unit))];
+  for (const u of units) {
+    u.revert = u.commits.some((c) => /^Revert/.test(c.subject));
+    u.reworked = [...u.files].some((f) => touches.get(f).some((d) => d.unit !== u && d.at > u.end && d.at - u.end <= REWORK_WINDOW));
   }
+  return units;
+}
+
+function findTop(dir, cache) {
+  const seen = [];
+  let top = null;
+  for (let d = dir; ; d = path.dirname(d)) {
+    if (cache.has(d)) { top = cache.get(d); break; }
+    seen.push(d);
+    if (fs.existsSync(path.join(d, ".git"))) { top = d; break; }
+    if (path.dirname(d) === d) break;
+  }
+  for (const d of seen) cache.set(d, top);
+  return top;
+}
+
+function ignoredPaths(top, paths) {
+  let out;
+  try {
+    out = execFileSync("git", ["-C", top, "check-ignore", "--stdin", "-z"], { input: paths.join("\0"), encoding: "utf8", stdio: ["pipe", "pipe", "ignore"], maxBuffer: 256 * 1024 * 1024 });
+  } catch (e) { out = e.status === 1 ? "" : null; }
+  return out === null ? null : new Set(out.split("\0").filter(Boolean));
+}
+
+// Each session's usage goes to the git repos its tool calls touched, split by touch count.
+// Bash working directories only count for sessions with no other repo touches.
+// A directory counts when a new file in it would be tracked.
+function attribute(sessions) {
+  const topCache = new Map();
+  const probes = new Map();
+  const touchTop = new Map();
+  for (const s of sessions) for (const p of [...s.touches.keys(), ...s.cwdTouches.keys()]) {
+    if (touchTop.has(p)) continue;
+    let isDir = false;
+    try { isDir = fs.statSync(p).isDirectory(); } catch {}
+    const top = p.includes(`${path.sep}.git${path.sep}`) ? null : findTop(isDir ? p : path.dirname(p), topCache);
+    const probe = isDir ? path.join(p, ".cctrim-probe") : p;
+    touchTop.set(p, top && { top, probe });
+    if (top) (probes.get(top) || probes.set(top, new Set()).get(top)).add(probe);
+  }
+  const common = new Map();
+  const ignored = new Map();
+  for (const [top, set] of probes) {
+    const [t, c] = (git(top, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]) || "").split("\n");
+    if (!c) continue;
+    common.set(top, { common: c, root: path.basename(c) === ".git" ? path.dirname(c) : t });
+    ignored.set(top, ignoredPaths(top, [...set]) || new Set(set));
+  }
+  const weigh = (touches) => {
+    const w = {};
+    for (const [p, n] of touches) {
+      const t = touchTop.get(p);
+      if (!t || !common.has(t.top) || ignored.get(t.top).has(t.probe)) continue;
+      const k = common.get(t.top).common;
+      w[k] = (w[k] || 0) + n;
+    }
+    return w;
+  };
+  for (const s of sessions) {
+    let w = weigh(s.touches);
+    if (!Object.keys(w).length) w = weigh(s.cwdTouches);
+    const sum = Object.values(w).reduce((a, n) => a + n, 0);
+    s.repoShares = sum ? Object.entries(w).map(([k, n]) => [k, n / sum]) : [];
+  }
+  return new Map([...common.values()].map((v) => [v.common, v.root]));
 }
 
 function shippedUnits(sessions, sinceMs, coverageMs) {
-  const byCwd = {};
-  let noCwdRead = 0;
-  for (const s of sessions) {
-    for (const [d, v] of Object.entries(s.daily)) {
-      if (Number(d) < coverageMs) continue;
-      if (!s.cwd) { noCwdRead += v.cacheRead; continue; }
-      const p = (byCwd[s.cwd] ||= { cacheRead: 0, total: 0, weeks: {} });
-      const e = (p.weeks[monday(Number(d))] ||= { cacheRead: 0, total: 0 });
-      p.cacheRead += v.cacheRead; p.total += v.total;
-      e.cacheRead += v.cacheRead; e.total += v.total;
-    }
-  }
-
+  const roots = attribute(sessions);
   const repos = {};
-  const skipped = { projects: 0, cacheRead: noCwdRead, noUser: 0 };
-  for (const [cwd, p] of Object.entries(byCwd)) {
-    const [top, common] = (fs.existsSync(cwd) && git(cwd, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]) || "").split("\n");
-    if (!common) { skipped.projects++; skipped.cacheRead += p.cacheRead; continue; }
-    const root = path.basename(common) === ".git" ? path.dirname(common) : top;
-    const r = (repos[common] ||= { root, cacheRead: 0, total: 0, weeks: {} });
-    r.cacheRead += p.cacheRead; r.total += p.total;
-    for (const [w, v] of Object.entries(p.weeks)) {
-      const e = (r.weeks[w] ||= { cacheRead: 0, total: 0 });
-      e.cacheRead += v.cacheRead; e.total += v.total;
+  const unattributed = { sessions: 0, cacheRead: 0 };
+  for (const s of sessions) {
+    const days = Object.entries(s.daily).filter(([d]) => Number(d) >= coverageMs);
+    if (!days.length) continue;
+    if (!s.repoShares.length) {
+      unattributed.sessions++;
+      for (const [, v] of days) unattributed.cacheRead += v.cacheRead;
+      continue;
+    }
+    for (const [common, share] of s.repoShares) {
+      const r = (repos[common] ||= { root: roots.get(common), cacheRead: 0, total: 0, weeks: {} });
+      for (const [d, v] of days) {
+        const e = (r.weeks[monday(Number(d))] ||= { cacheRead: 0, total: 0 });
+        r.cacheRead += v.cacheRead * share; r.total += v.total * share;
+        e.cacheRead += v.cacheRead * share; e.total += v.total * share;
+      }
     }
   }
 
+  const skipped = { projects: 0, cacheRead: 0, noUser: 0 };
   const projects = [];
   const weeks = {};
   const counted = new Set();
@@ -205,14 +305,14 @@ function shippedUnits(sessions, sinceMs, coverageMs) {
     if (!commits) { skipped.projects++; skipped.cacheRead += r.cacheRead; if (!email) skipped.noUser++; continue; }
     const mine = commits.filter((c) => c.email === email && c.at >= coverageMs && !counted.has(c.hash));
     for (const c of mine) counted.add(c.hash);
-    markRework(commits, mine);
+    const units = markRework(commits, mine);
     const week = (w) => (weeks[w] ||= { cacheRead: 0, total: 0, commits: 0 });
     for (const [w, v] of Object.entries(r.weeks)) { week(w).cacheRead += v.cacheRead; week(w).total += v.total; }
     for (const c of mine) week(monday(c.at)).commits++;
     projects.push({
-      project: short(r.root), commits: mine.length, cacheRead: r.cacheRead, total: r.total,
-      reworked: mine.filter((c) => c.reworked).length, reverts: mine.filter((c) => c.revert).length,
-      rework: mine.filter((c) => c.reworked || c.revert).length,
+      project: short(r.root), commits: mine.length, cacheRead: Math.round(r.cacheRead), total: Math.round(r.total), units: units.length,
+      reworked: units.filter((u) => u.reworked).length, reverts: units.filter((u) => u.revert).length,
+      rework: units.filter((u) => u.reworked || u.revert).length,
     });
   }
   projects.sort((a, b) => b.cacheRead - a.cacheRead);
@@ -223,12 +323,15 @@ function shippedUnits(sessions, sinceMs, coverageMs) {
   const overall = {
     projects: projects.length, commits, cacheRead: sum("cacheRead"), total: sum("total"),
     cacheReadPerCommit: perCommit(sum("cacheRead"), commits), totalPerCommit: perCommit(sum("total"), commits),
-    reworked: sum("reworked"), reverts: sum("reverts"), reworkShare: commits ? pct(sum("rework"), commits) : null,
+    units: sum("units"), reworked: sum("reworked"), reverts: sum("reverts"), reworkShare: sum("units") ? pct(sum("rework"), sum("units")) : null,
   };
+  unattributed.cacheRead = Math.round(unattributed.cacheRead);
+  unattributed.share = pct(unattributed.cacheRead, unattributed.cacheRead + overall.cacheRead + skipped.cacheRead);
+  skipped.cacheRead = Math.round(skipped.cacheRead);
 
   const now = Date.now();
   const full = Object.entries(weeks)
-    .map(([m, v]) => ({ week: weekLabel(Number(m)), start: Number(m), ...v }))
+    .map(([m, v]) => ({ week: weekLabel(Number(m)), start: Number(m), cacheRead: Math.round(v.cacheRead), total: Math.round(v.total), commits: v.commits }))
     .filter((w) => w.start >= coverageMs && w.start + WEEK <= now)
     .sort((a, b) => a.start - b.start);
   let comparison = null;
@@ -245,7 +348,7 @@ function shippedUnits(sessions, sinceMs, coverageMs) {
 
   return {
     since: new Date(coverageMs).toISOString(), transcriptsLimitWindow: coverageMs - sinceMs > DAY,
-    overall, projects, skipped,
+    overall, projects, unattributed, skipped,
     weeks: full.map(({ start, ...w }) => w), comparison,
   };
 }
@@ -383,17 +486,21 @@ function renderShipped(s, top, out, h) {
   const o = s.overall;
   h("Shipped units: your commits in the repos you used Claude Code in");
   if (s.transcriptsLimitWindow) out.push(dim(`  Transcripts only reach back to ${s.since.slice(0, 10)}, so usage and commits are both counted from then.`));
+  const un = s.unattributed;
+  const unLine = `${un.sessions.toLocaleString()} session(s) touched no files in a git repo: ${fmt(un.cacheRead)} cache-read tokens (${un.share}%) unattributed and not counted.`;
   if (!o.projects) {
-    out.push(yellow(`  No git repos to measure. Skipped ${s.skipped.projects} non-git project(s), ${fmt(s.skipped.cacheRead)} cache-read tokens.`));
+    out.push(yellow(`  No git repos to measure. ${unLine}`));
     return;
   }
   out.push(`  ${o.commits.toLocaleString()} commits across ${o.projects} repos: ${per(o.cacheReadPerCommit)} cache-read and ${per(o.totalPerCommit)} total tokens per commit`);
-  if (s.skipped.projects) out.push(dim(`  Skipped ${s.skipped.projects} non-git project(s), ${fmt(s.skipped.cacheRead)} cache-read tokens not counted.`));
+  out.push(dim("  Each session's usage goes to the repos whose files its tool calls touched, split by touch count. Per-commit figures use attributed usage only."));
+  if (un.sessions) out.push(dim(`  ${unLine}`));
+  if (s.skipped.projects) out.push(dim(`  Skipped ${s.skipped.projects} repo(s) with no git user or readable log, ${fmt(s.skipped.cacheRead)} cache-read tokens not counted.`));
   if (!o.commits) out.push(yellow("  No commits by your git user in these repos, so there's nothing to divide by."));
   out.push(table(s.projects.slice(0, top), [
     { h: "project", f: (p) => p.project }, { h: "commits", f: (p) => p.commits, right: true },
     { h: "cache-read", f: (p) => fmt(p.cacheRead), right: true }, { h: "per commit", f: (p) => per(p.commits ? Math.round(p.cacheRead / p.commits) : null), right: true },
-    { h: "total/commit", f: (p) => per(p.commits ? Math.round(p.total / p.commits) : null), right: true }, { h: "rework", f: (p) => (p.commits ? pct(p.rework, p.commits) + "%" : "-"), right: true },
+    { h: "total/commit", f: (p) => per(p.commits ? Math.round(p.total / p.commits) : null), right: true }, { h: "rework", f: (p) => (p.units ? pct(p.rework, p.units) + "%" : "-"), right: true },
   ]));
 
   out.push("", bold("  Heavier vs lighter weeks"));
@@ -407,8 +514,8 @@ function renderShipped(s, top, out, h) {
     out.push(dim(`  Complete ISO weeks, split at the median by cache reads${s.weeks.length % 2 ? "; the middle week is left out" : ""}.`));
   }
 
-  if (o.commits) out.push("", `  Rework: ${o.reworkShare}% of commits (${o.reworked} had a file changed again within 3 days, ${o.reverts} reverts)`);
-  if (o.commits) out.push(dim("  A rough proxy. Generated files and follow-up commits in a series count as rework too."));
+  if (o.commits) out.push("", `  Rework: ${o.reworkShare}% of ${o.units.toLocaleString()} change units (${o.reworked} had a file changed again within 3 days, ${o.reverts} with reverts)`);
+  if (o.commits) out.push(dim("  A rough proxy. A change unit is one commit, or a series by the same author within 30 minutes touching the same files. Lockfiles, build output, vendored and minified files are ignored."));
 }
 
 function render(r, top) {

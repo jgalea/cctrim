@@ -31,9 +31,13 @@ The report ends with concrete recommendations based on what it found.
 
 ## Usage per commit
 
-A usage report says what you spent, not whether it shipped anything. `--shipped` adds a section that counts your own commits (by `git config user.email`) in every git repo you ran Claude Code in, then divides usage by them, per repo and overall. It also splits your weeks into heavier and lighter halves by usage and compares commits per week and usage per commit, and shows a rework share: commits whose files another commit changed again within three days, plus reverts. That last one is a rough proxy: generated files and a series of follow-up commits count as rework too. Commits are the unit for now; merged PRs would be a better one.
+A usage report says what you spent, not whether it shipped anything. `--shipped` adds a section that counts your own commits (by `git config user.email`) in the git repos your sessions worked in, then divides usage by them, per repo and overall. It also splits your weeks into heavier and lighter halves by usage and compares commits per week and usage per commit, and shows a rework share: change units whose files another commit changed again within three days, plus reverts.
 
-Worktrees and clones of the same repo are counted once. Projects that aren't git repos are skipped and counted. Both usage and commits start where your transcripts do, and the week comparison needs at least four complete weeks.
+Usage goes to repos by the files each session's tool calls touched (reads, edits, writes, searches, and `cd` or `git -C` targets in shell commands), split by how often each repo was touched. A file counts for a repo only if the repo would track it, so a folder of separate projects with an ignore-everything `.gitignore` doesn't soak up their usage. A session's shell working directory only counts when it touched nothing else. Sessions that touched no repo files are reported as unattributed and left out of the per-commit figures.
+
+Rework is a rough proxy. Lockfiles, build and dist output, vendored, minified and source-map files are ignored, and a series of commits by the same author within 30 minutes touching the same files counts as one change unit. Commits are the unit for now; merged PRs would be a better one.
+
+Worktrees and clones of the same repo are counted once. Both usage and commits start where your transcripts do, and the week comparison needs at least four complete weeks.
 
 ## Options
 
@@ -72,7 +76,8 @@ With `--shipped`:
 ```
 Shipped units: your commits in the repos you used Claude Code in
   412 commits across 9 repos: 4.2M cache-read and 4.4M total tokens per commit
-  Skipped 3 non-git project(s), 61.0M cache-read tokens not counted.
+  Each session's usage goes to the repos whose files its tool calls touched, split by touch count. Per-commit figures use attributed usage only.
+  37 session(s) touched no files in a git repo: 61.0M cache-read tokens (3%) unattributed and not counted.
   project            commits  cache-read  per commit  total/commit  rework
   ~/code/api             188      910.4M        4.8M          5.0M     31%
   ~/code/site             97      402.7M        4.2M          4.3M     22%
@@ -82,7 +87,7 @@ Shipped units: your commits in the repos you used Claude Code in
   heavier (n=2)          552.0M            63        8.8M
   lighter (n=2)          214.5M            41        5.2M
 
-  Rework: 27% of commits (109 had a file changed again within 3 days, 2 reverts)
+  Rework: 27% of 330 change units (87 had a file changed again within 3 days, 2 with reverts)
 ```
 
 ## Notes
