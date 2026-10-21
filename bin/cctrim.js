@@ -166,7 +166,8 @@ function weekLabel(mon) {
 }
 
 // Repos found in transcripts may be clones nobody vetted, so config that can run a program is switched off.
-const GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=false", "-c", "diff.external=", "-c", "protocol.allow=never"];
+const GIT_SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=false", "-c", "diff.external=", "-c", "protocol.allow=never",
+  "-c", "log.showSignature=false", "-c", "gpg.program=false", "-c", "gpg.ssh.program=false", "-c", "gpg.x509.program=false"];
 const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0" };
 
 function git(cwd, args) {
@@ -176,7 +177,7 @@ function git(cwd, args) {
 }
 
 function readCommits(root, sinceMs) {
-  const out = git(root, ["log", "--branches", "--no-merges", "--no-renames", `--since=${new Date(sinceMs).toISOString()}`, "--format=%x1e%H%x09%at%x09%ae%x09%s", "--name-only", "--no-ext-diff", "--no-textconv"]);
+  const out = git(root, ["log", "--branches", "--no-merges", "--no-renames", `--since=${new Date(sinceMs).toISOString()}`, "--format=%x1e%H%x09%at%x09%ae%x09%s", "--name-only", "--no-ext-diff", "--no-textconv", "--no-show-signature"]);
   if (out === null) return null;
   return out.split("\x1e").filter(Boolean).map((chunk) => {
     const [head, ...files] = chunk.split("\n");
